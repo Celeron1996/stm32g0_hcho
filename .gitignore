@@ -1,0 +1,22 @@
+# Keil MDK build outputs
+MDK-ARM/stm32g0_hcho/
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.map
+*.lnp
+*.lst
+*.sct
+*.dep
+*.build_log.htm
+
+# Keil user / debugger files
+*.uvguix.*
+JLinkLog.txt
+JLinkSettings.ini
+
+# OS / editor files
+Thumbs.db
+.DS_Store
