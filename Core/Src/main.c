@@ -27,11 +27,7 @@
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-typedef enum
-{
-  UI_STATE_LOST = 0,
-  UI_STATE_READING
-} UI_State_t;
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -39,7 +35,7 @@ typedef enum
 #define HCHO_FRAME_SIZE       9U
 #define HCHO_FRAME_HEAD       0xFFU
 #define HCHO_GAS_CODE         0x17U
-#define HCHO_SIGNAL_TIMEOUT   3000U
+#define HCHO_SIGNAL_TIMEOUT   10000U
 #define OLED_I2C_TIMING       0x30414C4DU
 /* USER CODE END PD */
 
@@ -63,7 +59,8 @@ static volatile uint32_t hcho_last_frame_tick;
 static volatile uint8_t hcho_data_valid;
 static volatile uint8_t hcho_new_frame;
 
-static UI_State_t ui_state;
+static uint8_t ui_valid;
+static uint8_t ui_comm_error;
 static uint16_t ui_last_ppb;
 /* USER CODE END PV */
 
@@ -75,9 +72,7 @@ static void MX_USART2_UART_Init(void);
 static void MX_I2C1_Init(void);
 static void HCHO_Start(void);
 static void HCHO_ProcessByte(uint8_t byte);
-static void UI_ShowCenteredText(uint8_t y, const char *text, uint8_t size);
-static void UI_ShowReading(uint16_t ppb);
-static void UI_ShowMessage(const char *value, const char *message);
+static void UI_ShowReading(uint8_t valid, uint16_t ppb, uint8_t comm_error);
 static uint8_t FormatMgPerM3(uint16_t ppb, char *buffer);
 static uint8_t FormatU16(uint16_t value, char *buffer);
 static void LogString(const char *text);
@@ -131,9 +126,10 @@ int main(void)
     LogString("OLED init failed\r\n");
   }
 
-  UI_ShowMessage("---", "WAITING FOR DATA");
-  ui_state = UI_STATE_LOST;
+  ui_valid = 0U;
+  ui_comm_error = 0U;
   ui_last_ppb = 0xFFFFU;
+  UI_ShowReading(ui_valid, 0U, ui_comm_error);
 
   HCHO_Start();
   /* USER CODE END 2 */
@@ -150,6 +146,7 @@ int main(void)
     uint16_t ppb;
     uint8_t valid;
     uint8_t fresh;
+    uint8_t comm_error;
 
     __disable_irq();
     ppb = hcho_value_ppb;
@@ -159,37 +156,26 @@ int main(void)
     hcho_new_frame = 0U;
     __enable_irq();
 
-    if ((valid == 0U) || ((now - last_tick) > HCHO_SIGNAL_TIMEOUT))
+    comm_error = ((now - last_tick) > HCHO_SIGNAL_TIMEOUT) ? 1U : 0U;
+
+    if (fresh != 0U)
     {
-      if (ui_state != UI_STATE_LOST)
-      {
-        if (valid == 0U)
-        {
-          UI_ShowMessage("---", "WAITING FOR DATA");
-          LogString("waiting for sensor data\r\n");
-        }
-        else
-        {
-          UI_ShowMessage("---", "SENSOR NO SIGNAL");
-          LogString("sensor timeout\r\n");
-        }
-        ui_state = UI_STATE_LOST;
-      }
+      LogReading(ppb);
     }
-    else if ((fresh != 0U) || (ui_state != UI_STATE_READING) ||
-             (ppb != ui_last_ppb))
+
+    if ((valid != ui_valid) || (ppb != ui_last_ppb) ||
+        (comm_error != ui_comm_error))
     {
-      if (fresh != 0U)
+      if (comm_error != ui_comm_error)
       {
-        LogReading(ppb);
+        LogString((comm_error != 0U) ? "sensor timeout\r\n" :
+                  "sensor recovered\r\n");
       }
 
-      if ((ui_state != UI_STATE_READING) || (ppb != ui_last_ppb))
-      {
-        UI_ShowReading(ppb);
-        ui_last_ppb = ppb;
-      }
-      ui_state = UI_STATE_READING;
+      UI_ShowReading(valid, ppb, comm_error);
+      ui_valid = valid;
+      ui_last_ppb = ppb;
+      ui_comm_error = comm_error;
     }
 
     HAL_Delay(20);
@@ -372,53 +358,43 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
   }
 }
 
-static void UI_ShowCenteredText(uint8_t y, const char *text, uint8_t size)
-{
-  uint8_t width = OLED_StringWidth(text, size);
-  uint8_t x = (width < OLED_WIDTH) ? (uint8_t)((OLED_WIDTH - width) / 2U) : 0U;
-
-  OLED_ShowString(x, y, text, size);
-}
-
-static void UI_ShowReading(uint16_t ppb)
+static void UI_ShowReading(uint8_t valid, uint16_t ppb, uint8_t comm_error)
 {
   char value[8];
-  char ppb_text[12];
-  uint8_t value_length = FormatMgPerM3(ppb, value);
-  uint8_t value_width = (uint8_t)(value_length * 24U);
-  uint8_t x = (value_width < OLED_WIDTH) ?
-              (uint8_t)((OLED_WIDTH - value_width) / 2U) : 0U;
-  uint8_t text_length;
-  uint8_t ppb_width;
+  const char *error_text = "error";
+  uint8_t value_length;
+  uint8_t value_width;
+  uint8_t x;
 
   OLED_ClearBuffer();
 
-  OLED_ShowString(x, 2U, value, OLED_FONT_24X48);
-  OLED_ShowString(8U, 54U, "mg/m3", OLED_FONT_6X8);
+  if (valid != 0U)
+  {
+    value_length = FormatMgPerM3(ppb, value);
+    value_width = (uint8_t)(value_length * 24U);
+    x = (value_width < OLED_WIDTH) ?
+        (uint8_t)((OLED_WIDTH - value_width) / 2U) : 0U;
 
-  text_length = FormatU16(ppb, ppb_text);
-  ppb_text[text_length++] = ' ';
-  ppb_text[text_length++] = 'p';
-  ppb_text[text_length++] = 'p';
-  ppb_text[text_length++] = 'b';
-  ppb_text[text_length] = '\0';
+    OLED_ShowString(x, 2U, value, OLED_FONT_24X48);
+    OLED_ShowString(8U, 54U, "mg/m3", OLED_FONT_6X8);
+  }
+  else
+  {
+    value_width = OLED_StringWidth("---", OLED_FONT_24X48);
+    x = (value_width < OLED_WIDTH) ?
+        (uint8_t)((OLED_WIDTH - value_width) / 2U) : 0U;
 
-  ppb_width = OLED_StringWidth(ppb_text, OLED_FONT_6X8);
-  OLED_ShowString((uint8_t)(OLED_WIDTH - ppb_width - 8U), 54U, ppb_text,
-                  OLED_FONT_6X8);
+    OLED_ShowString(x, 2U, "---", OLED_FONT_24X48);
+  }
 
-  OLED_Refresh();
-}
+  if (comm_error != 0U)
+  {
+    uint8_t error_width = OLED_StringWidth(error_text, OLED_FONT_6X8);
 
-static void UI_ShowMessage(const char *value, const char *message)
-{
-  uint8_t value_width = OLED_StringWidth(value, OLED_FONT_24X48);
-  uint8_t x = (value_width < OLED_WIDTH) ?
-              (uint8_t)((OLED_WIDTH - value_width) / 2U) : 0U;
+    OLED_ShowString((uint8_t)(OLED_WIDTH - error_width - 8U), 54U, error_text,
+                    OLED_FONT_6X8);
+  }
 
-  OLED_ClearBuffer();
-  OLED_ShowString(x, 2U, value, OLED_FONT_24X48);
-  UI_ShowCenteredText(54U, message, OLED_FONT_6X8);
   OLED_Refresh();
 }
 
